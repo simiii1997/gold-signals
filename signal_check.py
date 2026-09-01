@@ -1,36 +1,49 @@
 """
-Gold-Scalping SIGNAL-Bot (kein Auto-Trading!) - v2
-=====================================================
+Gold-Scalping SIGNAL-Bot (kein Auto-Trading!) - Bollinger + RSI
+==================================================================
 
-VERBESSERUNG gegenueber v1:
-- M5-Kerzen statt M1 (weniger Rauschen/Fehlsignale)
-- Zusaetzlicher EMA50-Trendfilter: ein BUY-Signal wird nur akzeptiert,
-  wenn der Kurs UEBER dem EMA50 liegt (Aufwaertstrend), ein SELL-Signal
-  nur, wenn der Kurs UNTER dem EMA50 liegt (Abwaertstrend). Das reduziert
-  Signale gegen den uebergeordneten Trend.
+STRATEGIE (Mean-Reversion, typisch fuers Scalping):
+- Bollinger Baender (Periode 20, 2 Standardabweichungen) auf M1-Kerzen
+- RSI (Periode 14) als Bestaetigungsfilter
 
-Prüft, ob gerade ein Kauf-/Verkaufssignal vorliegt (EMA20-Kreuzung auf
-M5-Kerzen, bestaetigt durch EMA50-Trendfilter) und schickt bei einem
-Treffer eine Telegram-Nachricht. Die Order bestätigst/platzierst du
-danach SELBST in der capital.com App.
+BUY-Signal:
+    - vorherige Kerze schloss UNTER dem unteren Bollinger-Band
+    - aktuelle Kerze schliesst wieder DARUEBER (Rueckkehr)
+    - RSI der vorherigen Kerze lag unter 30 (ueberverkauft)
 
-Benötigte GitHub Secrets (unveraendert):
+SELL-Signal:
+    - vorherige Kerze schloss UEBER dem oberen Bollinger-Band
+    - aktuelle Kerze schliesst wieder DARUNTER (Rueckkehr)
+    - RSI der vorherigen Kerze lag ueber 70 (ueberkauft)
+
+Diese Logik reagiert auf kurzfristige Kursuebertreibungen und liefert
+dadurch deutlich mehr Signale als eine EMA-Trendkreuzung - dafuer sind
+einzelne Signale nicht zwingend "sicherer", nur haeufiger. Mean-Reversion
+funktioniert tendenziell besser in Seitwaertsphasen und schlechter in
+starken, klaren Trends (dort kann der Kurs laenger ausserhalb der
+Baender bleiben, als man erwartet).
+
+Benötigte GitHub Secrets (gleich geblieben):
     CAPITAL_API_KEY, CAPITAL_IDENTIFIER, CAPITAL_PASSWORD, CAPITAL_EPIC
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 """
 
 import os
 import sys
+import math
 import requests
 
 BASE_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 EPIC = os.environ.get("CAPITAL_EPIC", "GOLD")
 
-FAST_EMA_PERIOD = int(os.environ.get("EMA_PERIOD", "20"))
-SLOW_EMA_PERIOD = int(os.environ.get("SLOW_EMA_PERIOD", "50"))
-CANDLE_RESOLUTION = "MINUTE_5"   # M5-Kerzen statt M1
-# genug Kerzen fuer den langsameren EMA plus Puffer
-CANDLE_COUNT = SLOW_EMA_PERIOD + 15
+BB_PERIOD = int(os.environ.get("BB_PERIOD", "20"))
+BB_STD_DEV = float(os.environ.get("BB_STD_DEV", "2.0"))
+RSI_PERIOD = int(os.environ.get("RSI_PERIOD", "14"))
+RSI_OVERSOLD = float(os.environ.get("RSI_OVERSOLD", "30"))
+RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "70"))
+
+CANDLE_RESOLUTION = "MINUTE"  # M1 - fuer schnellere Scalping-Signale
+CANDLE_COUNT = max(BB_PERIOD, RSI_PERIOD) + 20
 
 
 def login():
@@ -63,53 +76,81 @@ def get_closes(cst, token):
     return closes
 
 
-def ema_series(closes, period):
-    """Gibt die komplette EMA-Reihe zurueck (gleiche Laenge wie moeglich)."""
+def bollinger_bands(closes, period, std_dev_mult):
+    """Gibt Listen (mid, upper, lower) zurueck, ausgerichtet aufs Ende von closes."""
     if len(closes) < period:
+        return None, None, None
+    mids, uppers, lowers = [], [], []
+    for i in range(period - 1, len(closes)):
+        window = closes[i - period + 1: i + 1]
+        mean = sum(window) / period
+        variance = sum((x - mean) ** 2 for x in window) / period
+        std_dev = math.sqrt(variance)
+        mids.append(mean)
+        uppers.append(mean + std_dev_mult * std_dev)
+        lowers.append(mean - std_dev_mult * std_dev)
+    return mids, uppers, lowers
+
+
+def rsi_series(closes, period):
+    """Klassischer RSI (Wilder-Glaettung), ausgerichtet aufs Ende von closes."""
+    if len(closes) < period + 1:
         return None
-    k = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    series = [ema]
-    for price in closes[period:]:
-        ema = price * k + ema * (1 - k)
-        series.append(ema)
-    return series
+
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rsis = []
+
+    def calc_rsi(ag, al):
+        if al == 0:
+            return 100.0
+        rs = ag / al
+        return 100 - (100 / (1 + rs))
+
+    rsis.append(calc_rsi(avg_gain, avg_loss))
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rsis.append(calc_rsi(avg_gain, avg_loss))
+
+    return rsis
 
 
 def decide_signal(closes):
-    """
-    Regel:
-    - Fast-EMA (z.B. EMA20) kreuzt von unten nach oben -> moegliches BUY
-    - Fast-EMA kreuzt von oben nach unten -> moegliches SELL
-    - Bestaetigung durch Slow-EMA (z.B. EMA50) als Trendfilter:
-        BUY nur, wenn letzter Schlusskurs > Slow-EMA (Aufwaertstrend)
-        SELL nur, wenn letzter Schlusskurs < Slow-EMA (Abwaertstrend)
-    """
-    if len(closes) < SLOW_EMA_PERIOD + 2:
+    mids, uppers, lowers = bollinger_bands(closes, BB_PERIOD, BB_STD_DEV)
+    rsis = rsi_series(closes, RSI_PERIOD)
+    if not uppers or not rsis:
         return None
 
-    fast_series = ema_series(closes, FAST_EMA_PERIOD)
-    slow_series = ema_series(closes, SLOW_EMA_PERIOD)
-    if not fast_series or not slow_series:
+    # Alle Reihen ans Ende ausrichten (gleiche Laenge nehmen)
+    min_len = min(len(uppers), len(rsis), len(closes))
+    if min_len < 2:
         return None
 
-    # Serien auf gleiche Laenge bringen (am Ende ausrichten)
-    min_len = min(len(fast_series), len(slow_series), len(closes))
-    fast_series = fast_series[-min_len:]
-    slow_series = slow_series[-min_len:]
     closes_aligned = closes[-min_len:]
+    uppers = uppers[-min_len:]
+    lowers = lowers[-min_len:]
+    rsis = rsis[-min_len:]
 
     prev_close, last_close = closes_aligned[-2], closes_aligned[-1]
-    prev_fast, last_fast = fast_series[-2], fast_series[-1]
-    last_slow = slow_series[-1]
+    prev_upper, prev_lower = uppers[-2], lowers[-2]
+    prev_rsi = rsis[-2]
 
-    crossed_up = prev_close < prev_fast and last_close > last_fast
-    crossed_down = prev_close > prev_fast and last_close < last_fast
+    # Rueckkehr von unten ins Band + vorher ueberverkauft
+    if prev_close < prev_lower and last_close > prev_lower and prev_rsi < RSI_OVERSOLD:
+        return "BUY", last_close, prev_rsi
 
-    if crossed_up and last_close > last_slow:
-        return "BUY", last_close, last_slow
-    if crossed_down and last_close < last_slow:
-        return "SELL", last_close, last_slow
+    # Rueckkehr von oben ins Band + vorher ueberkauft
+    if prev_close > prev_upper and last_close < prev_upper and prev_rsi > RSI_OVERBOUGHT:
+        return "SELL", last_close, prev_rsi
+
     return None
 
 
@@ -127,17 +168,16 @@ def main():
     signal = decide_signal(closes)
 
     if signal:
-        direction, price, slow_ema = signal
+        direction, price, rsi_value = signal
         emoji = "🟢" if direction == "BUY" else "🔴"
         msg = (
-            f"{emoji} {direction}-Signal auf {EPIC} (M5)\n"
+            f"{emoji} {direction}-Signal auf {EPIC} (M1, Bollinger+RSI)\n"
             f"Kurs: {price:.2f}\n"
-            f"EMA{FAST_EMA_PERIOD}-Kreuzung, bestaetigt durch EMA{SLOW_EMA_PERIOD}-Trend "
-            f"({slow_ema:.2f})\n"
-            f"Bitte manuell in der capital.com App pruefen und ggf. Order platzieren."
+            f"RSI zum Signalzeitpunkt: {rsi_value:.1f}\n"
+            f"Bitte manuell in der capital.com App prüfen und ggf. Order platzieren."
         )
         send_telegram(msg)
-        print(f"Signal gesendet: {direction} @ {price:.2f} (Trend-EMA: {slow_ema:.2f})")
+        print(f"Signal gesendet: {direction} @ {price:.2f} (RSI: {rsi_value:.1f})")
     else:
         print("Kein Signal.")
 
