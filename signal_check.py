@@ -37,10 +37,10 @@ BASE_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 EPIC = os.environ.get("CAPITAL_EPIC", "GOLD")
 
 BB_PERIOD = int(os.environ.get("BB_PERIOD", "20"))
-BB_STD_DEV = float(os.environ.get("BB_STD_DEV", "2.0"))
+BB_STD_DEV = float(os.environ.get("BB_STD_DEV", "1.5"))
 RSI_PERIOD = int(os.environ.get("RSI_PERIOD", "14"))
-RSI_OVERSOLD = float(os.environ.get("RSI_OVERSOLD", "30"))
-RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "70"))
+RSI_OVERSOLD = float(os.environ.get("RSI_OVERSOLD", "35"))
+RSI_OVERBOUGHT = float(os.environ.get("RSI_OVERBOUGHT", "65"))
 
 CANDLE_RESOLUTION = "MINUTE"  # M1 - fuer schnellere Scalping-Signale
 CANDLE_COUNT = max(BB_PERIOD, RSI_PERIOD) + 20
