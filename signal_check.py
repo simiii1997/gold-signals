@@ -1,24 +1,26 @@
 """
-Gold-Scalping SIGNAL-Bot (kein Auto-Trading!) - Momentum-Breakout
-====================================================================
+Gold-Swing-Signal-Bot (kein Auto-Trading!) - M15, EMA20/EMA50
+==================================================================
 
-STRATEGIE (Trendfolge/Momentum, fuer haeufigere kleine Bewegungen):
-- Schaut auf die letzten LOOKBACK M1-Kerzen (Standard: 10)
-- BUY-Signal: aktueller Schlusskurs bricht ueber das Hoch dieser Kerzen
-  aus (+ Mindestabstand in Punkten, um Mini-Ausbrueche zu filtern)
-- SELL-Signal: aktueller Schlusskurs bricht unter das Tief dieser
-  Kerzen aus
+STRATEGIE (Swing/kurzfristiger Trend, passend zum 5-Minuten-Check):
+- M15-Kerzen (15-Minuten-Kerzen) statt M1
+- EMA20 (schnell) kreuzt EMA50 (langsam)
+- BUY: EMA20 kreuzt von unten nach oben ueber EMA50 (Trendwechsel nach oben)
+- SELL: EMA20 kreuzt von oben nach unten unter EMA50 (Trendwechsel nach unten)
 
-Das ist das Gegenteil von Mean-Reversion (Bollinger+RSI): hier wird
-NICHT auf eine Umkehr gewartet, sondern eine beginnende Bewegung
-moeglichst frueh mitgenommen. Dadurch entstehen mehr Signale, aber auch
-mehr "Fehlausbrueche" (Kurs bricht kurz aus und faellt gleich zurueck
-in die Range - sogenannte "Fakeouts").
+WARUM DIESER ZEITRAHMEN JETZT SINN ERGIBT:
+Bei M1-Kerzen ist eine 5-Minuten-Pruefverzoegerung fatal, weil die
+gesamte Bewegung oft nur 1-3 Minuten dauert. Bei M15-Kerzen dauert eine
+einzelne Kerze bereits 15 Minuten - eine Verzoegerung von 5 Minuten beim
+Erkennen macht hier nur einen kleinen Teil der Bewegung aus, nicht die
+ganze. Ein EMA20/50-Crossover auf M15 zeigt typischerweise einen
+Trend, der sich ueber mehrere Stunden entwickelt - genug Zeit, um nach
+der Benachrichtigung noch sinnvoll zu reagieren.
 
-Wichtiger Hinweis: Diese Strategie hat KEIN eingebautes Take-Profit/
-Stop-Loss-Konzept in der Nachricht - du entscheidest bei jedem Signal
-selbst, wie weit du die Bewegung mitgehen willst (z.B. feste 10 Punkte
-Ziel, wie in deinem Beispiel 4370 -> 4380).
+WICHTIG: Auch diese Strategie ist nicht "sicher" oder garantiert
+profitabel - EMA-Crossover-Systeme haben in Seitwaertsphasen weiterhin
+viele Fehlsignale. Sie ist lediglich technisch sinnvoller mit der
+aktuellen 5-Minuten-Pruefarchitektur vereinbar als ein M1-Ansatz.
 
 Benötigte GitHub Secrets (gleich geblieben):
     CAPITAL_API_KEY, CAPITAL_IDENTIFIER, CAPITAL_PASSWORD, CAPITAL_EPIC
@@ -32,11 +34,11 @@ import requests
 BASE_URL = "https://demo-api-capital.backend-capital.com/api/v1"
 EPIC = os.environ.get("CAPITAL_EPIC", "GOLD")
 
-LOOKBACK = int(os.environ.get("LOOKBACK_CANDLES", "10"))
-MIN_BREAKOUT_POINTS = float(os.environ.get("MIN_BREAKOUT_POINTS", "0.5"))
+FAST_EMA_PERIOD = int(os.environ.get("EMA_FAST", "20"))
+SLOW_EMA_PERIOD = int(os.environ.get("EMA_SLOW", "50"))
 
-CANDLE_RESOLUTION = "MINUTE"  # M1 fuer schnelle Reaktion
-CANDLE_COUNT = LOOKBACK + 10
+CANDLE_RESOLUTION = "MINUTE_15"  # M15 statt M1
+CANDLE_COUNT = SLOW_EMA_PERIOD + 15
 
 
 def login():
@@ -51,7 +53,7 @@ def login():
     return resp.headers["CST"], resp.headers["X-SECURITY-TOKEN"]
 
 
-def get_candles(cst, token):
+def get_closes(cst, token):
     url = f"{BASE_URL}/prices/{EPIC}"
     headers = {
         "X-CAP-API-KEY": os.environ["CAPITAL_API_KEY"],
@@ -62,35 +64,47 @@ def get_candles(cst, token):
     resp = requests.get(url, headers=headers, params=params, timeout=15)
     resp.raise_for_status()
     prices = resp.json()["prices"]
-    candles = []
-    for c in prices:
-        close = (c["closePrice"]["bid"] + c["closePrice"]["ask"]) / 2
-        high = (c["highPrice"]["bid"] + c["highPrice"]["ask"]) / 2
-        low = (c["lowPrice"]["bid"] + c["lowPrice"]["ask"]) / 2
-        candles.append({"close": close, "high": high, "low": low})
-    return candles
+    closes = []
+    for candle in prices:
+        c = candle["closePrice"]
+        closes.append((c["bid"] + c["ask"]) / 2)
+    return closes
 
 
-def decide_signal(candles):
-    """
-    Vergleicht die aktuelle (letzte) Kerze mit dem Hoch/Tief der
-    LOOKBACK Kerzen DAVOR (die aktuelle Kerze selbst zaehlt nicht zur
-    Range, sonst waere ein Ausbruch nie moeglich).
-    """
-    if len(candles) < LOOKBACK + 1:
+def ema_series(closes, period):
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(closes[:period]) / period
+    series = [ema]
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+        series.append(ema)
+    return series
+
+
+def decide_signal(closes):
+    fast = ema_series(closes, FAST_EMA_PERIOD)
+    slow = ema_series(closes, SLOW_EMA_PERIOD)
+    if not fast or not slow:
         return None
 
-    current = candles[-1]
-    window = candles[-(LOOKBACK + 1):-1]  # die LOOKBACK Kerzen davor
+    min_len = min(len(fast), len(slow))
+    if min_len < 2:
+        return None
+    fast = fast[-min_len:]
+    slow = slow[-min_len:]
 
-    range_high = max(c["high"] for c in window)
-    range_low = min(c["low"] for c in window)
+    prev_fast, last_fast = fast[-2], fast[-1]
+    prev_slow, last_slow = slow[-2], slow[-1]
 
-    if current["close"] > range_high + MIN_BREAKOUT_POINTS:
-        return "BUY", current["close"], range_high
-    if current["close"] < range_low - MIN_BREAKOUT_POINTS:
-        return "SELL", current["close"], range_low
+    crossed_up = prev_fast < prev_slow and last_fast > last_slow
+    crossed_down = prev_fast > prev_slow and last_fast < last_slow
 
+    if crossed_up:
+        return "BUY", last_fast, last_slow
+    if crossed_down:
+        return "SELL", last_fast, last_slow
     return None
 
 
@@ -104,20 +118,21 @@ def send_telegram(message):
 
 def main():
     cst, token = login()
-    candles = get_candles(cst, token)
-    signal = decide_signal(candles)
+    closes = get_closes(cst, token)
+    signal = decide_signal(closes)
 
     if signal:
-        direction, price, range_edge = signal
+        direction, fast_val, slow_val = signal
         emoji = "🟢" if direction == "BUY" else "🔴"
         msg = (
-            f"{emoji} {direction}-Momentum auf {EPIC} (M1, {LOOKBACK}er-Breakout)\n"
-            f"Kurs: {price:.2f}\n"
-            f"Ausbruch über/unter Range-Kante: {range_edge:.2f}\n"
+            f"{emoji} {direction}-Swing-Signal auf {EPIC} (M15)\n"
+            f"EMA{FAST_EMA_PERIOD}: {fast_val:.2f} | EMA{SLOW_EMA_PERIOD}: {slow_val:.2f}\n"
+            f"Trendwechsel auf 15-Minuten-Basis erkannt.\n"
             f"Bitte manuell in der capital.com App prüfen und ggf. Order platzieren."
         )
         send_telegram(msg)
-        print(f"Signal gesendet: {direction} @ {price:.2f} (Range-Kante: {range_edge:.2f})")
+        print(f"Signal gesendet: {direction} (EMA{FAST_EMA_PERIOD}: {fast_val:.2f}, "
+              f"EMA{SLOW_EMA_PERIOD}: {slow_val:.2f})")
     else:
         print("Kein Signal.")
 
