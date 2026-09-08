@@ -22,7 +22,6 @@ def send_telegram_message(message):
         print(f"[CONSOLE] {message}")
 
 def check_gold_signals():
-    # Spot Gold Ticker statt Futures
     ticker = "XAUUSD=X"
     df = yf.download(tickers=ticker, period="1d", interval="1m")
 
@@ -33,11 +32,11 @@ def check_gold_signals():
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 1. EMA Berechnungen (9 und 21)
+    # 1. EMAs (9 & 21)
     df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-    # 2. RSI (14) Berechnungen
+    # 2. RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -45,7 +44,6 @@ def check_gold_signals():
     df['RSI'] = 100 - (100 / (1 + rs))
     df['RSI'] = df['RSI'].fillna(50)
 
-    # Aktuelle Kerze
     latest = df.iloc[-1]
 
     close_p = float(latest['Close'])
@@ -55,11 +53,13 @@ def check_gold_signals():
     ema21 = float(latest['EMA21'])
     rsi = float(latest['RSI'])
 
-    # Long: Trend Up (EMA9 > EMA21), Low dipped to/below EMA21, RSI reset in 40-55
-    is_long = (ema9 > ema21) and (low_p <= ema21) and (40 <= rsi <= 55)
+    # Tolleranz-Distanz zum EMA21 (z. B. $0.50 Puffer)
+    near_ema21_long = low_p <= (ema21 + 0.50)
+    near_ema21_short = high_p >= (ema21 - 0.50)
 
-    # Short: Trend Down (EMA9 < EMA21), High reached/above EMA21, RSI reset in 45-60
-    is_short = (ema9 < ema21) and (high_p >= ema21) and (45 <= rsi <= 60)
+    # Entspannte Bedingungen für häufigere Signale
+    is_long = (ema9 > ema21) and near_ema21_long and (35 <= rsi <= 60)
+    is_short = (ema9 < ema21) and near_ema21_short and (40 <= rsi <= 65)
 
     if is_long:
         tp = close_p + 2.00
@@ -67,7 +67,7 @@ def check_gold_signals():
         msg = (
             f"⚡ **GOLD 1M SCALP: LONG** 🚀\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **EMA 21 (Support):** ${ema21:.2f}\n"
+            f"• **EMA 21:** ${ema21:.2f}\n"
             f"• **RSI (14):** {rsi:.1f}\n\n"
             f"🎯 **Take Profit:** ${tp:.2f} (+$2.00)\n"
             f"🛑 **Stop Loss:** ${sl:.2f} (-$1.50)"
@@ -80,7 +80,7 @@ def check_gold_signals():
         msg = (
             f"⚡ **GOLD 1M SCALP: SHORT** 🔻\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **EMA 21 (Resist):** ${ema21:.2f}\n"
+            f"• **EMA 21:** ${ema21:.2f}\n"
             f"• **RSI (14):** {rsi:.1f}\n\n"
             f"🎯 **Take Profit:** ${tp:.2f} (-$2.00)\n"
             f"🛑 **Stop Loss:** ${sl:.2f} (+$1.50)"
