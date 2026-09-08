@@ -4,136 +4,84 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# Telegram Bot Konfiguration (Nutzt die GitHub Repository Secrets)
+# Telegram Bot Konfiguration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-
 def send_telegram_message(message):
-    """Sendet eine Benachrichtigung an den Telegram-Bot."""
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown",
-        }
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
         try:
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            print("Telegram-Nachricht erfolgreich gesendet.")
+            res = requests.post(url, json=payload, timeout=10)
+            res.raise_for_status()
+            print("Telegram-Nachricht gesendet.")
         except Exception as e:
-            print(f"Fehler beim Senden der Telegram-Nachricht: {e}")
+            print(f"Fehler bei Telegram: {e}")
     else:
-        print(f"[CONSOLE ALERT] {message}")
+        print(f"[CONSOLE] {message}")
 
-
-def calculate_hoss_signals():
-    """Lädt 1m-Golddaten, berechnet VWAP-Bänder & OBV-RSI (mit 2-Kerzen-Toleranz)
-
-    und versendet Signale.
-    """
-    # Gold-Futures Tick-Data (1-Minuten-Intervall)
+def check_gold_signals():
+    # 1m Daten laden
     ticker = "GC=F"
     df = yf.download(tickers=ticker, period="1d", interval="1m")
 
-    if df.empty or len(df) < 300:
-        print(
-            "Nicht genügend Marktdaten von yfinance empfangen. Versuch abgebrochen."
-        )
+    if df.empty or len(df) < 50:
+        print("Nicht genügend Daten empfangen.")
         return
 
-    # MultiIndex-Spalten von yfinance bereinigen (falls vorhanden)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # ==========================================
-    # 1. VWAP & DEVIATION BERECHNUNG (300 Perioden)
-    # ==========================================
-    vwap_window = 300
-    dev_mult = 1.5
+    # 1. EMA Berechnungen (9 und 21)
+    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
+    df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-    df["TP"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["PV"] = df["TP"] * df["Volume"]
-
-    # Gleitender VWAP und Standardabweichung
-    df["VWAP"] = (
-        df["PV"].rolling(window=vwap_window).sum()
-        / df["Volume"].rolling(window=vwap_window).sum()
-    )
-    df["StdDev"] = df["Close"].rolling(window=vwap_window).std()
-
-    df["UpperBand"] = df["VWAP"] + (df["StdDev"] * dev_mult)
-    df["LowerBand"] = df["VWAP"] - (df["StdDev"] * dev_mult)
-
-    # ==========================================
-    # 2. OBV & OBV-RSI BERECHNUNG (Länge = 5)
-    # ==========================================
-    df["PriceChange"] = df["Close"].diff()
-    df["OBV_Direction"] = np.where(
-        df["PriceChange"] > 0, 1, np.where(df["PriceChange"] < 0, -1, 0)
-    )
-    df["OBV"] = (df["OBV_Direction"] * df["Volume"]).cumsum()
-
-    rsi_length = 5
-    delta = df["OBV"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_length).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_length).mean()
-
-    # Division durch Null abfangen
+    # 2. RSI (14) Berechnungen
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, np.nan)
-    df["OBV_RSI"] = 100 - (100 / (1 + rs))
-    df["OBV_RSI"] = df["OBV_RSI"].fillna(50)
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = df['RSI'].fillna(50)
 
-    # ==========================================
-    # 3. SIGNAL-PRÜFUNG MIT 2-KERZEN-TOLERANZ
-    # ==========================================
-    # Prüfe den RSI der letzten 3 Kerzen (aktuelle Minute + 2 davor)
-    recent_rsi_max = df["OBV_RSI"].iloc[-3:].max()
-    recent_rsi_min = df["OBV_RSI"].iloc[-3:].min()
-
-    # Daten der aktuell geschlossenen Kerze
+    # Aktuelle Kerze und Vorherige Kerze prüfen
     latest = df.iloc[-1]
-    close_price = float(latest["Close"])
-    low_price = float(latest["Low"])
-    high_price = float(latest["High"])
-    upper_band = float(latest["UpperBand"])
-    lower_band = float(latest["LowerBand"])
-    current_rsi = float(latest["OBV_RSI"])
+    prev = df.iloc[-2]
 
-    # Bedingungen: Band berührt JETZT + RSI war in den letzten 2 Min extrem
-    is_long = (low_price <= lower_band) and (recent_rsi_min <= 30)
-    is_short = (high_price >= upper_band) and (recent_rsi_max >= 70)
+    close_p = float(latest['Close'])
+    low_p = float(latest['Low'])
+    high_p = float(latest['High'])
+    ema9 = float(latest['EMA9'])
+    ema21 = float(latest['EMA21'])
+    rsi = float(latest['RSI'])
 
-    # ==========================================
-    # 4. SIGNAL AUSGABE / TELEGRAM ALERT
-    # ==========================================
+    # Long: Trend Up (EMA9 > EMA21), Low dipped to/below EMA21, RSI reset in 40-55
+    is_long = (ema9 > ema21) and (low_p <= ema21) and (40 <= rsi <= 55)
+
+    # Short: Trend Down (EMA9 < EMA21), High reached/above EMA21, RSI reset in 45-60
+    is_short = (ema9 < ema21) and (high_p >= ema21) and (45 <= rsi <= 60)
+
     if is_long:
         msg = (
-            f"🚀 **HOSS GOLD LONG SIGNAL**\n\n"
-            f"• **Kurs:** ${close_price:.2f}\n"
-            f"• **Unteres Band:** ${lower_band:.2f}\n"
-            f"• **OBV RSI (Min 3m):** {recent_rsi_min:.1f}\n"
-            f"• **Aktueller RSI:** {current_rsi:.1f}"
+            f"⚡ **GOLD 1M SCALP: LONG** 🚀\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **EMA 21 (Support):** ${ema21:.2f}\n"
+            f"• **RSI (14):** {rsi:.1f}\n"
+            f"• **Ziel:** TP +$2.00 / SL -$1.50"
         )
         send_telegram_message(msg)
-
     elif is_short:
         msg = (
-            f"🔻 **HOSS GOLD SHORT SIGNAL**\n\n"
-            f"• **Kurs:** ${close_price:.2f}\n"
-            f"• **Oberes Band:** ${upper_band:.2f}\n"
-            f"• **OBV RSI (Max 3m):** {recent_rsi_max:.1f}\n"
-            f"• **Aktueller RSI:** {current_rsi:.1f}"
+            f"⚡ **GOLD 1M SCALP: SHORT** 🔻\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **EMA 21 (Resist):** ${ema21:.2f}\n"
+            f"• **RSI (14):** {rsi:.1f}\n"
+            f"• **Ziel:** TP +$2.00 / SL -$1.50"
         )
         send_telegram_message(msg)
-
     else:
-        print(
-            f"Kein Signal | Kurs: ${close_price:.2f} | Upper: ${upper_band:.2f} | "
-            f"Lower: ${lower_band:.2f} | RSI: {current_rsi:.1f} (3m Max: {recent_rsi_max:.1f})"
-        )
-
+        print(f"Kein Signal | Kurs: ${close_p:.2f} | EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f} | RSI: {rsi:.1f}")
 
 if __name__ == "__main__":
-    calculate_hoss_signals()
+    check_gold_signals()
