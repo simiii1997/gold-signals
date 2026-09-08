@@ -22,11 +22,11 @@ def send_telegram_message(message):
         print(f"[CONSOLE] {message}")
 
 def check_gold_signals():
-    # 1m Daten laden
-    ticker = "GC=F"
+    # Spot Gold Ticker statt Futures
+    ticker = "XAUUSD=X"
     df = yf.download(tickers=ticker, period="1d", interval="1m")
 
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 30:
         print("Nicht genügend Daten empfangen.")
         return
 
@@ -45,9 +45,8 @@ def check_gold_signals():
     df['RSI'] = 100 - (100 / (1 + rs))
     df['RSI'] = df['RSI'].fillna(50)
 
-    # Aktuelle Kerze und Vorherige Kerze prüfen
+    # Aktuelle Kerze
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
 
     close_p = float(latest['Close'])
     low_p = float(latest['Low'])
@@ -63,23 +62,31 @@ def check_gold_signals():
     is_short = (ema9 < ema21) and (high_p >= ema21) and (45 <= rsi <= 60)
 
     if is_long:
+        tp = close_p + 2.00
+        sl = close_p - 1.50
         msg = (
             f"⚡ **GOLD 1M SCALP: LONG** 🚀\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
             f"• **EMA 21 (Support):** ${ema21:.2f}\n"
-            f"• **RSI (14):** {rsi:.1f}\n"
-            f"• **Ziel:** TP +$2.00 / SL -$1.50"
+            f"• **RSI (14):** {rsi:.1f}\n\n"
+            f"🎯 **Take Profit:** ${tp:.2f} (+$2.00)\n"
+            f"🛑 **Stop Loss:** ${sl:.2f} (-$1.50)"
         )
         send_telegram_message(msg)
+
     elif is_short:
+        tp = close_p - 2.00
+        sl = close_p + 1.50
         msg = (
             f"⚡ **GOLD 1M SCALP: SHORT** 🔻\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
             f"• **EMA 21 (Resist):** ${ema21:.2f}\n"
-            f"• **RSI (14):** {rsi:.1f}\n"
-            f"• **Ziel:** TP +$2.00 / SL -$1.50"
+            f"• **RSI (14):** {rsi:.1f}\n\n"
+            f"🎯 **Take Profit:** ${tp:.2f} (-$2.00)\n"
+            f"🛑 **Stop Loss:** ${sl:.2f} (+$1.50)"
         )
         send_telegram_message(msg)
+
     else:
         print(f"Kein Signal | Kurs: ${close_p:.2f} | EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f} | RSI: {rsi:.1f}")
 
