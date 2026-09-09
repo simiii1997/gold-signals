@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# Telegram Bot Konfiguration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -22,50 +21,71 @@ def send_telegram_message(message):
         print(f"[CONSOLE] {message}")
 
 def check_gold_signals():
-    # Spot Gold Ticker
-    ticker = "XAUUSD=X"
-    df = yf.download(tickers=ticker, period="1d", interval="1m")
+    # Versuche zuerst Spot-Gold, sonst Futures
+    df = pd.DataFrame()
+    for ticker in ["XAUUSD=X", "GC=F"]:
+        try:
+            df = yf.download(tickers=ticker, period="1d", interval="1m", progress=False)
+            if not df.empty and len(df) >= 25:
+                print(f"Daten erfolgreich geladen für {ticker}")
+                break
+        except Exception as e:
+            print(f"Fehler beim Laden von {ticker}: {e}")
 
-    if df.empty or len(df) < 15:
-        print("Nicht genügend Daten empfangen.")
+    if df.empty or len(df) < 25:
+        print("Keine ausreichenden Marktdaten erhalten.")
         return
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 1. RSI (14) zur Momentum-Bestätigung
+    # 1. EMAs berechnen
+    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
+    df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
+
+    # 2. RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, np.nan)
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['RSI'] = df['RSI'].fillna(50)
+    df['RSI'] = (100 - (100 / (1 + rs))).fillna(50)
 
-    # 2. Highs & Lows der letzten 5 Kerzen (ohne die aktuellste)
-    df['High_5'] = df['High'].shift(1).rolling(window=5).max()
-    df['Low_5'] = df['Low'].shift(1).rolling(window=5).min()
-
+    # Letzte 2 Kerzen vergleichen
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
 
     close_p = float(latest['Close'])
-    high_5 = float(latest['High_5'])
-    low_5 = float(latest['Low_5'])
+    low_p = float(latest['Low'])
+    high_p = float(latest['High'])
+    
+    ema9_cur = float(latest['EMA9'])
+    ema21_cur = float(latest['EMA21'])
+    ema9_prev = float(prev['EMA9'])
+    ema21_prev = float(prev['EMA21'])
+    
     rsi = float(latest['RSI'])
 
-    # LONG: Aktueller Preis bricht das 5-Minuten-Hoch + RSI zeigt Stärke (> 52)
-    is_long = (close_p > high_5) and (rsi > 52)
+    # Bedingungen für Signale:
+    # LONG: EMA9 schlägt EMA21 nach oben OR (Aufwärtstrend + Test der EMA21)
+    bullish_cross = (ema9_prev <= ema21_prev) and (ema9_cur > ema21_cur)
+    bullish_pullback = (ema9_cur > ema21_cur) and (low_p <= ema21_cur + 0.30) and (rsi >= 40)
+    
+    is_long = bullish_cross or bullish_pullback
 
-    # SHORT: Aktueller Preis bricht das 5-Minuten-Tief + RSI zeigt Schwäche (< 48)
-    is_short = (close_p < low_5) and (rsi < 48)
+    # SHORT: EMA9 schlägt EMA21 nach unten OR (Abwärtstrend + Test der EMA21)
+    bearish_cross = (ema9_prev >= ema21_prev) and (ema9_cur < ema21_cur)
+    bearish_pullback = (ema9_cur < ema21_cur) and (high_p >= ema21_cur - 0.30) and (rsi <= 60)
+
+    is_short = bearish_cross or bearish_pullback
 
     if is_long:
         tp = close_p + 1.50
         sl = close_p - 1.00
         msg = (
-            f"⚡ **GOLD BREAKOUT: LONG** 🚀\n\n"
+            f"⚡ **GOLD 1M SCALP: LONG** 🚀\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **5m High Durchbrochen:** ${high_5:.2f}\n"
-            f"• **RSI:** {rsi:.1f}\n\n"
+            f"• **EMA 9:** ${ema9_cur:.2f} | **EMA 21:** ${ema21_cur:.2f}\n"
+            f"• **RSI (14):** {rsi:.1f}\n\n"
             f"🎯 **Take Profit:** ${tp:.2f} (+$1.50)\n"
             f"🛑 **Stop Loss:** ${sl:.2f} (-$1.00)"
         )
@@ -75,17 +95,17 @@ def check_gold_signals():
         tp = close_p - 1.50
         sl = close_p + 1.00
         msg = (
-            f"⚡ **GOLD BREAKOUT: SHORT** 🔻\n\n"
+            f"⚡ **GOLD 1M SCALP: SHORT** 🔻\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **5m Low Durchbrochen:** ${low_5:.2f}\n"
-            f"• **RSI:** {rsi:.1f}\n\n"
+            f"• **EMA 9:** ${ema9_cur:.2f} | **EMA 21:** ${ema21_cur:.2f}\n"
+            f"• **RSI (14):** {rsi:.1f}\n\n"
             f"🎯 **Take Profit:** ${tp:.2f} (-$1.50)\n"
             f"🛑 **Stop Loss:** ${sl:.2f} (+$1.00)"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Warten auf Breakout | Kurs: ${close_p:.2f} | 5m-High: ${high_5:.2f} | 5m-Low: ${low_5:.2f} | RSI: {rsi:.1f}")
+        print(f"Kein Signal | Kurs: ${close_p:.2f} | EMA9: ${ema9_cur:.2f} | EMA21: ${ema21_cur:.2f} | RSI: {rsi:.1f}")
 
 if __name__ == "__main__":
     check_gold_signals()
