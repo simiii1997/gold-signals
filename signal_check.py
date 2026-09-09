@@ -2,10 +2,10 @@ import os
 import requests
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 def send_telegram_message(message):
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -17,95 +17,79 @@ def send_telegram_message(message):
             print("Telegram-Nachricht gesendet.")
         except Exception as e:
             print(f"Fehler bei Telegram: {e}")
-    else:
-        print(f"[CONSOLE] {message}")
+
+def get_gold_data():
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1min&outputsize=30&apikey={TWELVE_DATA_API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if "values" not in data:
+            print(f"API Fehler: {data}")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data["values"])
+        df = df.iloc[::-1].reset_index(drop=True)
+        
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = df[col].astype(float)
+            
+        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
+        return df
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Daten: {e}")
+        return pd.DataFrame()
 
 def check_gold_signals():
-    # Versuche zuerst Spot-Gold, sonst Futures
-    df = pd.DataFrame()
-    for ticker in ["XAUUSD=X", "GC=F"]:
-        try:
-            df = yf.download(tickers=ticker, period="1d", interval="1m", progress=False)
-            if not df.empty and len(df) >= 25:
-                print(f"Daten erfolgreich geladen für {ticker}")
-                break
-        except Exception as e:
-            print(f"Fehler beim Laden von {ticker}: {e}")
+    df = get_gold_data()
 
-    if df.empty or len(df) < 25:
-        print("Keine ausreichenden Marktdaten erhalten.")
+    if df.empty or len(df) < 20:
+        print("Keine ausreichenden Live-Daten empfangen.")
         return
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    # 1. Kerzenspannen (Range = High - Low) berechnen
+    df['Range'] = df['High'] - df['Low']
+    
+    # Durchschnittliche Kerzengröße der letzten 10 Kerzen (ohne die aktuelle)
+    avg_range_10 = df['Range'].iloc[-11:-1].mean()
+    
+    # Höchst-/Tiefstpreis der letzten 10 Kerzen
+    highest_10 = df['High'].iloc[-11:-1].max()
+    lowest_10 = df['Low'].iloc[-11:-1].min()
 
-    # 1. EMAs berechnen
-    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
-    df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
-
-    # 2. RSI (14)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df['RSI'] = (100 - (100 / (1 + rs))).fillna(50)
-
-    # Letzte 2 Kerzen vergleichen
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
     close_p = float(latest['Close'])
-    low_p = float(latest['Low'])
     high_p = float(latest['High'])
-    
-    ema9_cur = float(latest['EMA9'])
-    ema21_cur = float(latest['EMA21'])
-    ema9_prev = float(prev['EMA9'])
-    ema21_prev = float(prev['EMA21'])
-    
-    rsi = float(latest['RSI'])
+    low_p = float(latest['Low'])
+    current_range = float(latest['Range'])
 
-    # Bedingungen für Signale:
-    # LONG: EMA9 schlägt EMA21 nach oben OR (Aufwärtstrend + Test der EMA21)
-    bullish_cross = (ema9_prev <= ema21_prev) and (ema9_cur > ema21_cur)
-    bullish_pullback = (ema9_cur > ema21_cur) and (low_p <= ema21_cur + 0.30) and (rsi >= 40)
-    
-    is_long = bullish_cross or bullish_pullback
+    # 2. Ausbruchs-Bedingungen (Momentum / Volatilität)
+    # Kerze muss mindestens 2.0x so groß sein wie der Schnitt + neues High/Low durchbrechen
+    is_breakout_up = (current_range >= avg_range_10 * 2.0) and (high_p > highest_10) and (close_p > latest['Open'])
+    is_breakout_down = (current_range >= avg_range_10 * 2.0) and (low_p < lowest_10) and (close_p < latest['Open'])
 
-    # SHORT: EMA9 schlägt EMA21 nach unten OR (Abwärtstrend + Test der EMA21)
-    bearish_cross = (ema9_prev >= ema21_prev) and (ema9_cur < ema21_cur)
-    bearish_pullback = (ema9_cur < ema21_cur) and (high_p >= ema21_cur - 0.30) and (rsi <= 60)
-
-    is_short = bearish_cross or bearish_pullback
-
-    if is_long:
-        tp = close_p + 1.50
-        sl = close_p - 1.00
+    if is_breakout_up:
         msg = (
-            f"⚡ **GOLD 1M SCALP: LONG** 🚀\n\n"
-            f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **EMA 9:** ${ema9_cur:.2f} | **EMA 21:** ${ema21_cur:.2f}\n"
-            f"• **RSI (14):** {rsi:.1f}\n\n"
-            f"🎯 **Take Profit:** ${tp:.2f} (+$1.50)\n"
-            f"🛑 **Stop Loss:** ${sl:.2f} (-$1.00)"
+            f"🚀 **STARKER GOLD BREAKOUT: LONG** 🚀\n\n"
+            f"• **Aktueller Kurs:** ${close_p:.2f}\n"
+            f"• **Kerzenspanne:** ${current_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
+            f"• **10m Hoch durchbrochen:** ${highest_10:.2f}\n\n"
+            f"⚠️ *Hohe Dynamik / Ausbruch nach oben!*"
         )
         send_telegram_message(msg)
 
-    elif is_short:
-        tp = close_p - 1.50
-        sl = close_p + 1.00
+    elif is_breakout_down:
         msg = (
-            f"⚡ **GOLD 1M SCALP: SHORT** 🔻\n\n"
-            f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **EMA 9:** ${ema9_cur:.2f} | **EMA 21:** ${ema21_cur:.2f}\n"
-            f"• **RSI (14):** {rsi:.1f}\n\n"
-            f"🎯 **Take Profit:** ${tp:.2f} (-$1.50)\n"
-            f"🛑 **Stop Loss:** ${sl:.2f} (+$1.00)"
+            f"💥 **STARKER GOLD BREAKOUT: SHORT** 🔻\n\n"
+            f"• **Aktueller Kurs:** ${close_p:.2f}\n"
+            f"• **Kerzenspanne:** ${current_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
+            f"• **10m Tief durchbrochen:** ${lowest_10:.2f}\n\n"
+            f"⚠️ *Hohe Dynamik / Ausbruch nach unten!*"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Kein Signal | Kurs: ${close_p:.2f} | EMA9: ${ema9_cur:.2f} | EMA21: ${ema21_cur:.2f} | RSI: {rsi:.1f}")
+        print(f"Kein Breakout | Kurs: ${close_p:.2f} | Span: ${current_range:.2f} | Schnitt 10m: ${avg_range_10:.2f}")
 
 if __name__ == "__main__":
     check_gold_signals()
