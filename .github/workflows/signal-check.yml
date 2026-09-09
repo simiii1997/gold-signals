@@ -1,10 +1,10 @@
-name: Gold Signal Check
+name: Gold Signal Check 1M
 
 on:
   schedule:
-    # Startet alle 5 Minuten einen neuen Runner
+    # Startet alle 5 Minuten einen Runner
     - cron: '*/5 * * * *'
-  workflow_dispatch: # Erlaubt das manuelle Ausführen per Button auf GitHub
+  workflow_dispatch: # Erlaubt auch das manuelle Starten per Button
 
 jobs:
   check-signal:
@@ -24,14 +24,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy yfinance requests
 
-      - name: Run signal check every minute
+      - name: Run signal check every single minute
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Führt das Skript 5-mal im Abstand von 60 Sekunden aus
+          # Führt das Skript 5-mal im Abstand von exakt 60 Sekunden aus
           for i in {1..5}; do
-            echo "--- Durchlauf $i von 5 ---"
+            echo "=== Minute $i von 5 ==="
             python signal_check.py
             if [ $i -lt 5 ]; then
               sleep 60
