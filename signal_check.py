@@ -19,7 +19,7 @@ def send_telegram_message(message):
             print(f"Fehler bei Telegram: {e}")
 
 def get_gold_data():
-    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1min&outputsize=30&apikey={TWELVE_DATA_API_KEY}"
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1min&outputsize=20&apikey={TWELVE_DATA_API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -43,58 +43,49 @@ def get_gold_data():
 def check_gold_signals():
     df = get_gold_data()
 
-    if df.empty or len(df) < 20:
+    if df.empty or len(df) < 10:
         print("Keine ausreichenden Live-Daten empfangen.")
         return
 
-    # Kerzenspannen berechnen
-    df['Range'] = df['High'] - df['Low']
-    
-    # Durchschnittliche Kerzengröße der letzten 10 geschlossenen Kerzen
-    avg_range_10 = df['Range'].iloc[-12:-2].mean()
-    
-    # 5-Minuten-Spannweite (ohne die aktuelle Kerze)
-    highest_5 = df['High'].iloc[-7:-2].max()
-    lowest_5 = df['Low'].iloc[-7:-2].min()
-
-    # Wir betrachten die aktuellste vollständig abgeschlossene Kerze (Index -2)
+    # Letzte vollendete Kerze (Index -2)
     candle = df.iloc[-2]
     close_p = float(candle['Close'])
     open_p = float(candle['Open'])
-    high_p = float(candle['High'])
-    low_p = float(candle['Low'])
-    candle_range = float(candle['Range'])
 
-    # Dynamische Filter (deutlich empfindlicher):
-    # 1. Kerze ist mindestens 40% größer als der 10m-Schnitt ODER mindestens $1.20 groß
-    has_volatility = (candle_range >= avg_range_10 * 1.4) or (candle_range >= 1.20)
-    
-    # 2. Ausbruch aus dem 5m Hoch/Tief
-    is_long = has_volatility and (close_p > highest_5) and (close_p > open_p)
-    is_short = has_volatility and (close_p < lowest_5) and (close_p < open_p)
+    # Hochs und Tiefs der 5 Kerzen DAVOR (Index -7 bis -2)
+    highest_5 = df['High'].iloc[-7:-2].max()
+    lowest_5 = df['Low'].iloc[-7:-2].min()
+
+    # Reine Breakout-Logik
+    is_long = (close_p > highest_5) and (close_p > open_p)
+    is_short = (close_p < lowest_5) and (close_p < open_p)
 
     if is_long:
+        tp = close_p + 1.50
+        sl = close_p - 1.00
         msg = (
             f"🚀 **GOLD BREAKOUT: LONG** 🚀\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **Kerzen-Spanne:** ${candle_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
-            f"• **5m Hoch durchbrochen:** ${highest_5:.2f}\n\n"
-            f"🎯 **TP:** +$2.00 | 🛑 **SL:** -$1.00"
+            f"• **5m High Durchbrochen:** ${highest_5:.2f}\n\n"
+            f"🎯 **TP:** ${tp:.2f} (+$1.50)\n"
+            f"🛑 **SL:** ${sl:.2f} (-$1.00)"
         )
         send_telegram_message(msg)
 
     elif is_short:
+        tp = close_p - 1.50
+        sl = close_p + 1.00
         msg = (
             f"💥 **GOLD BREAKOUT: SHORT** 🔻\n\n"
             f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **Kerzen-Spanne:** ${candle_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
-            f"• **5m Tief durchbrochen:** ${lowest_5:.2f}\n\n"
-            f"🎯 **TP:** -$2.00 | 🛑 **SL:** +$1.00"
+            f"• **5m Low Durchbrochen:** ${lowest_5:.2f}\n\n"
+            f"🎯 **TP:** ${tp:.2f} (-$1.50)\n"
+            f"🛑 **SL:** ${sl:.2f} (+$1.00)"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Kein Ausbruch | Kurs: ${close_p:.2f} | Kerzen-Spanne: ${candle_range:.2f} | Schnitt 10m: ${avg_range_10:.2f}")
+        print(f"Kein Breakout | Kurs: ${close_p:.2f} | 5m High: ${highest_5:.2f} | 5m Low: ${lowest_5:.2f}")
 
 if __name__ == "__main__":
     check_gold_signals()
