@@ -19,11 +19,11 @@ def send_telegram_message(message):
             print(f"Fehler bei Telegram: {e}")
 
 def get_gold_data():
-    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1min&outputsize=20&apikey={TWELVE_DATA_API_KEY}"
+    # 3-Minuten Intervall für deutlich höhere Signal-Qualität beim Gold-Scalping
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=3min&outputsize=250&apikey={TWELVE_DATA_API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
-        
         if "values" not in data:
             print(f"API Fehler: {data}")
             return pd.DataFrame()
@@ -37,55 +37,99 @@ def get_gold_data():
         df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
         return df
     except Exception as e:
-        print(f"Fehler beim Abrufen der Daten: {e}")
+        print(f"Fehler beim Laden: {e}")
         return pd.DataFrame()
 
 def check_gold_signals():
     df = get_gold_data()
 
-    if df.empty or len(df) < 10:
-        print("Keine ausreichenden Live-Daten empfangen.")
+    if df.empty or len(df) < 200:
+        print("Keine ausreichenden Daten (mind. 200 Kerzen für EMA200 benötigt).")
         return
 
-    # Letzte vollendete Kerze (Index -2)
+    # 1. EMA 200 für den übergeordneten Trend
+    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+
+    # 2. UT Bot Alerts Berechnungen (Key: 1.0, ATR: 10)
+    key_sensitivity = 1.0
+    atr_period = 10
+
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift(1))
+    low_close = np.abs(df['Low'] - df['Close'].shift(1))
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(window=atr_period).mean()
+
+    df['xATRTrailingStop'] = 0.0
+    df['pos'] = 0
+
+    for i in range(1, len(df)):
+        prev_stop = df.loc[i-1, 'xATRTrailingStop']
+        prev_close = df.loc[i-1, 'Close']
+        curr_close = df.loc[i, 'Close']
+        nLoss = key_sensitivity * df.loc[i, 'ATR']
+
+        if curr_close > prev_stop and prev_close > prev_stop:
+            df.loc[i, 'xATRTrailingStop'] = max(prev_stop, curr_close - nLoss)
+        elif curr_close < prev_stop and prev_close < prev_stop:
+            df.loc[i, 'xATRTrailingStop'] = min(prev_stop, curr_close + nLoss)
+        elif curr_close > prev_stop:
+            df.loc[i, 'xATRTrailingStop'] = curr_close - nLoss
+        else:
+            df.loc[i, 'xATRTrailingStop'] = curr_close + nLoss
+
+        if prev_close < prev_stop and curr_close > prev_stop:
+            df.loc[i, 'pos'] = 1
+        elif prev_close > prev_stop and curr_close < prev_stop:
+            df.loc[i, 'pos'] = -1
+        else:
+            df.loc[i, 'pos'] = df.loc[i-1, 'pos']
+
+    # Betrachte die letzte VOLLSTÄNDIG GESCHLOSSENE Kerze (Index -2)
     candle = df.iloc[-2]
-    close_p = float(candle['Close'])
-    open_p = float(candle['Open'])
+    prev_candle = df.iloc[-3]
 
-    # Hochs und Tiefs der 5 Kerzen DAVOR (Index -7 bis -2)
-    highest_5 = df['High'].iloc[-7:-2].max()
-    lowest_5 = df['Low'].iloc[-7:-2].min()
+    close_p = candle['Close']
+    ema200 = candle['EMA200']
+    
+    curr_pos = candle['pos']
+    prev_pos = prev_candle['pos']
 
-    # Reine Breakout-Logik
-    is_long = (close_p > highest_5) and (close_p > open_p)
-    is_short = (close_p < lowest_5) and (close_p < open_p)
+    # Trend-Gefilterte Einstiege:
+    # BUY nur wenn UT Bot anschlägt UND der Kurs ÜBER dem EMA 200 steht
+    is_buy = (curr_pos == 1) and (prev_pos != 1) and (close_p > ema200)
+    
+    # SELL nur wenn UT Bot anschlägt UND der Kurs UNTER dem EMA 200 steht
+    is_sell = (curr_pos == -1) and (prev_pos != -1) and (close_p < ema200)
 
-    if is_long:
-        tp = close_p + 1.50
-        sl = close_p - 1.00
+    if is_buy:
+        tp = close_p + 3.00
+        sl = close_p - 2.00
         msg = (
-            f"🚀 **GOLD BREAKOUT: LONG** 🚀\n\n"
-            f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **5m High Durchbrochen:** ${highest_5:.2f}\n\n"
-            f"🎯 **TP:** ${tp:.2f} (+$1.50)\n"
-            f"🛑 **SL:** ${sl:.2f} (-$1.00)"
+            f"🎯 **UT BOT PRO: BUY (LONG)** 🚀\n\n"
+            f"• **Einstiegskurs:** ${close_p:.2f}\n"
+            f"• **EMA 200 Trend:** Bullisch (${ema200:.2f})\n"
+            f"• **Trailing Stop:** ${candle['xATRTrailingStop']:.2f}\n\n"
+            f"🎯 **Take Profit:** ${tp:.2f} (+$3.00)\n"
+            f"🛑 **Stop Loss:** ${sl:.2f} (-$2.00)"
         )
         send_telegram_message(msg)
 
-    elif is_short:
-        tp = close_p - 1.50
-        sl = close_p + 1.00
+    elif is_sell:
+        tp = close_p - 3.00
+        sl = close_p + 2.00
         msg = (
-            f"💥 **GOLD BREAKOUT: SHORT** 🔻\n\n"
-            f"• **Kurs:** ${close_p:.2f}\n"
-            f"• **5m Low Durchbrochen:** ${lowest_5:.2f}\n\n"
-            f"🎯 **TP:** ${tp:.2f} (-$1.50)\n"
-            f"🛑 **SL:** ${sl:.2f} (+$1.00)"
+            f"🎯 **UT BOT PRO: SELL (SHORT)** 🔻\n\n"
+            f"• **Einstiegskurs:** ${close_p:.2f}\n"
+            f"• **EMA 200 Trend:** Bärisch (${ema200:.2f})\n"
+            f"• **Trailing Stop:** ${candle['xATRTrailingStop']:.2f}\n\n"
+            f"🎯 **Take Profit:** ${tp:.2f} (-$3.00)\n"
+            f"🛑 **Stop Loss:** ${sl:.2f} (+$2.00)"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Kein Breakout | Kurs: ${close_p:.2f} | 5m High: ${highest_5:.2f} | 5m Low: ${lowest_5:.2f}")
+        print(f"Kein gefiltertes Signal | Kurs: ${close_p:.2f} | EMA200: ${ema200:.2f} | Trend: {'LONG' if curr_pos == 1 else 'SHORT'}")
 
 if __name__ == "__main__":
     check_gold_signals()
