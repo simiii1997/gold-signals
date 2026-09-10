@@ -47,49 +47,54 @@ def check_gold_signals():
         print("Keine ausreichenden Live-Daten empfangen.")
         return
 
-    # 1. Kerzenspannen (Range = High - Low) berechnen
+    # Kerzenspannen berechnen
     df['Range'] = df['High'] - df['Low']
     
-    # Durchschnittliche Kerzengröße der letzten 10 Kerzen (ohne die aktuelle)
-    avg_range_10 = df['Range'].iloc[-11:-1].mean()
+    # Durchschnittliche Kerzengröße der letzten 10 geschlossenen Kerzen
+    avg_range_10 = df['Range'].iloc[-12:-2].mean()
     
-    # Höchst-/Tiefstpreis der letzten 10 Kerzen
-    highest_10 = df['High'].iloc[-11:-1].max()
-    lowest_10 = df['Low'].iloc[-11:-1].min()
+    # 5-Minuten-Spannweite (ohne die aktuelle Kerze)
+    highest_5 = df['High'].iloc[-7:-2].max()
+    lowest_5 = df['Low'].iloc[-7:-2].min()
 
-    latest = df.iloc[-1]
-    close_p = float(latest['Close'])
-    high_p = float(latest['High'])
-    low_p = float(latest['Low'])
-    current_range = float(latest['Range'])
+    # Wir betrachten die aktuellste vollständig abgeschlossene Kerze (Index -2)
+    candle = df.iloc[-2]
+    close_p = float(candle['Close'])
+    open_p = float(candle['Open'])
+    high_p = float(candle['High'])
+    low_p = float(candle['Low'])
+    candle_range = float(candle['Range'])
 
-    # 2. Ausbruchs-Bedingungen (Momentum / Volatilität)
-    # Kerze muss mindestens 2.0x so groß sein wie der Schnitt + neues High/Low durchbrechen
-    is_breakout_up = (current_range >= avg_range_10 * 2.0) and (high_p > highest_10) and (close_p > latest['Open'])
-    is_breakout_down = (current_range >= avg_range_10 * 2.0) and (low_p < lowest_10) and (close_p < latest['Open'])
+    # Dynamische Filter (deutlich empfindlicher):
+    # 1. Kerze ist mindestens 40% größer als der 10m-Schnitt ODER mindestens $1.20 groß
+    has_volatility = (candle_range >= avg_range_10 * 1.4) or (candle_range >= 1.20)
+    
+    # 2. Ausbruch aus dem 5m Hoch/Tief
+    is_long = has_volatility and (close_p > highest_5) and (close_p > open_p)
+    is_short = has_volatility and (close_p < lowest_5) and (close_p < open_p)
 
-    if is_breakout_up:
+    if is_long:
         msg = (
-            f"🚀 **STARKER GOLD BREAKOUT: LONG** 🚀\n\n"
-            f"• **Aktueller Kurs:** ${close_p:.2f}\n"
-            f"• **Kerzenspanne:** ${current_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
-            f"• **10m Hoch durchbrochen:** ${highest_10:.2f}\n\n"
-            f"⚠️ *Hohe Dynamik / Ausbruch nach oben!*"
+            f"🚀 **GOLD BREAKOUT: LONG** 🚀\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **Kerzen-Spanne:** ${candle_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
+            f"• **5m Hoch durchbrochen:** ${highest_5:.2f}\n\n"
+            f"🎯 **TP:** +$2.00 | 🛑 **SL:** -$1.00"
         )
         send_telegram_message(msg)
 
-    elif is_breakout_down:
+    elif is_short:
         msg = (
-            f"💥 **STARKER GOLD BREAKOUT: SHORT** 🔻\n\n"
-            f"• **Aktueller Kurs:** ${close_p:.2f}\n"
-            f"• **Kerzenspanne:** ${current_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
-            f"• **10m Tief durchbrochen:** ${lowest_10:.2f}\n\n"
-            f"⚠️ *Hohe Dynamik / Ausbruch nach unten!*"
+            f"💥 **GOLD BREAKOUT: SHORT** 🔻\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **Kerzen-Spanne:** ${candle_range:.2f} (Schnitt: ${avg_range_10:.2f})\n"
+            f"• **5m Tief durchbrochen:** ${lowest_5:.2f}\n\n"
+            f"🎯 **TP:** -$2.00 | 🛑 **SL:** +$1.00"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Kein Breakout | Kurs: ${close_p:.2f} | Span: ${current_range:.2f} | Schnitt 10m: ${avg_range_10:.2f}")
+        print(f"Kein Ausbruch | Kurs: ${close_p:.2f} | Kerzen-Spanne: ${candle_range:.2f} | Schnitt 10m: ${avg_range_10:.2f}")
 
 if __name__ == "__main__":
     check_gold_signals()
