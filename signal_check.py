@@ -19,8 +19,8 @@ def send_telegram_message(message):
             print(f"Fehler bei Telegram: {e}")
 
 def get_gold_data():
-    # 3-Minuten Intervall für deutlich höhere Signal-Qualität beim Gold-Scalping
-    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=3min&outputsize=250&apikey={TWELVE_DATA_API_KEY}"
+    # 1-Minuten-Intervall für direkte Scalping-Reaktion
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1min&outputsize=100&apikey={TWELVE_DATA_API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -43,93 +43,67 @@ def get_gold_data():
 def check_gold_signals():
     df = get_gold_data()
 
-    if df.empty or len(df) < 200:
-        print("Keine ausreichenden Daten (mind. 200 Kerzen für EMA200 benötigt).")
+    if df.empty or len(df) < 30:
+        print("Keine ausreichenden Daten empfangen.")
         return
 
-    # 1. EMA 200 für den übergeordneten Trend
-    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    # 1. EMAs berechnen (Schneller 9er und 21er)
+    df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
+    df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
 
-    # 2. UT Bot Alerts Berechnungen (Key: 1.0, ATR: 10)
-    key_sensitivity = 1.0
-    atr_period = 10
-
+    # 2. ATR (Volatilität)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift(1))
     low_close = np.abs(df['Low'] - df['Close'].shift(1))
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(window=atr_period).mean()
+    df['ATR'] = tr.rolling(window=10).mean()
 
-    df['xATRTrailingStop'] = 0.0
-    df['pos'] = 0
-
-    for i in range(1, len(df)):
-        prev_stop = df.loc[i-1, 'xATRTrailingStop']
-        prev_close = df.loc[i-1, 'Close']
-        curr_close = df.loc[i, 'Close']
-        nLoss = key_sensitivity * df.loc[i, 'ATR']
-
-        if curr_close > prev_stop and prev_close > prev_stop:
-            df.loc[i, 'xATRTrailingStop'] = max(prev_stop, curr_close - nLoss)
-        elif curr_close < prev_stop and prev_close < prev_stop:
-            df.loc[i, 'xATRTrailingStop'] = min(prev_stop, curr_close + nLoss)
-        elif curr_close > prev_stop:
-            df.loc[i, 'xATRTrailingStop'] = curr_close - nLoss
-        else:
-            df.loc[i, 'xATRTrailingStop'] = curr_close + nLoss
-
-        if prev_close < prev_stop and curr_close > prev_stop:
-            df.loc[i, 'pos'] = 1
-        elif prev_close > prev_stop and curr_close < prev_stop:
-            df.loc[i, 'pos'] = -1
-        else:
-            df.loc[i, 'pos'] = df.loc[i-1, 'pos']
-
-    # Betrachte die letzte VOLLSTÄNDIG GESCHLOSSENE Kerze (Index -2)
+    # Wir betrachten die aktuellste geschlossene Kerze (Index -2)
     candle = df.iloc[-2]
     prev_candle = df.iloc[-3]
 
     close_p = candle['Close']
-    ema200 = candle['EMA200']
+    open_p = candle['Open']
+    ema9 = candle['EMA9']
+    ema21 = candle['EMA21']
     
-    curr_pos = candle['pos']
-    prev_pos = prev_candle['pos']
+    prev_ema9 = prev_candle['EMA9']
+    prev_ema21 = prev_candle['EMA21']
 
-    # Trend-Gefilterte Einstiege:
-    # BUY nur wenn UT Bot anschlägt UND der Kurs ÜBER dem EMA 200 steht
-    is_buy = (curr_pos == 1) and (prev_pos != 1) and (close_p > ema200)
-    
-    # SELL nur wenn UT Bot anschlägt UND der Kurs UNTER dem EMA 200 steht
-    is_sell = (curr_pos == -1) and (prev_pos != -1) and (close_p < ema200)
+    # FANG-LOGIK: Reagiert wenn der Crossover in den letzten 2 Kerzen stattfand
+    cross_up = (ema9 > ema21) and (prev_ema9 <= prev_ema21)
+    cross_down = (ema9 < ema21) and (prev_ema9 >= prev_ema21)
 
-    if is_buy:
-        tp = close_p + 3.00
-        sl = close_p - 2.00
+    # Momentum-Bestätigung (Kerze schließt in Trendrichtung)
+    is_long = cross_up and (close_p > open_p)
+    is_short = cross_down and (close_p < open_p)
+
+    if is_long:
+        tp = close_p + 1.50
+        sl = close_p - 1.00
         msg = (
-            f"🎯 **UT BOT PRO: BUY (LONG)** 🚀\n\n"
-            f"• **Einstiegskurs:** ${close_p:.2f}\n"
-            f"• **EMA 200 Trend:** Bullisch (${ema200:.2f})\n"
-            f"• **Trailing Stop:** ${candle['xATRTrailingStop']:.2f}\n\n"
-            f"🎯 **Take Profit:** ${tp:.2f} (+$3.00)\n"
-            f"🛑 **Stop Loss:** ${sl:.2f} (-$2.00)"
+            f"⚡ **GOLD SCALP: LONG SIGNAL** 🚀\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **EMA 9/21 Crossover nach oben**\n\n"
+            f"🎯 **TP:** ${tp:.2f} (+$1.50)\n"
+            f"🛑 **SL:** ${sl:.2f} (-$1.00)"
         )
         send_telegram_message(msg)
 
-    elif is_sell:
-        tp = close_p - 3.00
-        sl = close_p + 2.00
+    elif is_short:
+        tp = close_p - 1.50
+        sl = close_p + 1.00
         msg = (
-            f"🎯 **UT BOT PRO: SELL (SHORT)** 🔻\n\n"
-            f"• **Einstiegskurs:** ${close_p:.2f}\n"
-            f"• **EMA 200 Trend:** Bärisch (${ema200:.2f})\n"
-            f"• **Trailing Stop:** ${candle['xATRTrailingStop']:.2f}\n\n"
-            f"🎯 **Take Profit:** ${tp:.2f} (-$3.00)\n"
-            f"🛑 **Stop Loss:** ${sl:.2f} (+$2.00)"
+            f"⚡ **GOLD SCALP: SHORT SIGNAL** 🔻\n\n"
+            f"• **Kurs:** ${close_p:.2f}\n"
+            f"• **EMA 9/21 Crossover nach unten**\n\n"
+            f"🎯 **TP:** ${tp:.2f} (-$1.50)\n"
+            f"🛑 **SL:** ${sl:.2f} (+$1.00)"
         )
         send_telegram_message(msg)
 
     else:
-        print(f"Kein gefiltertes Signal | Kurs: ${close_p:.2f} | EMA200: ${ema200:.2f} | Trend: {'LONG' if curr_pos == 1 else 'SHORT'}")
+        print(f"Kein Crossover | Kurs: ${close_p:.2f} | EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f}")
 
 if __name__ == "__main__":
     check_gold_signals()
